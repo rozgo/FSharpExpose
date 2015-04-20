@@ -1,4 +1,5 @@
 ﻿open System
+open System.Collections
 open System.IO
 open System.Text
 open System.Text.RegularExpressions
@@ -7,30 +8,13 @@ open Microsoft.FSharp.Compiler.SourceCodeServices
 open Newtonsoft.Json.FSharp
 open FSharp.Control
 
-open System.Text.RegularExpressions
-   
-let (|Match|_|) (pat:string) (inp:string) =
-    let m = Regex.Match(inp, pat) in
-    if m.Success
-    then Some (List.tail [ for g in m.Groups -> g.Value ])
-    else None
+let (|FirstRegexGroup|_|) pattern input =
+   let m = Regex.Match(input,pattern) 
+   if (m.Success) then Some m.Groups.[1].Value else None 
 
-let convert<'ToType> value = Convert.ChangeType(value, typeof<'ToType>) :?> 'ToType
-let (|Match3|_|) (pat:string) (inp:string) : ('T1 * 'T2 * 'T3) option =
-    match (|Match|_|) pat inp with
-    | Some (fst :: snd :: trd :: []) -> 
-        try 
-            Some (convert<'T1> fst, convert<'T2> snd, convert<'T3> trd) 
-        with _ -> failwith "Match3 succeeded, but with type conversion errors"
-    | Some [] -> failwith "Match3 succeeded, but no groups found. Use '(.*)' to capture groups"
-    | Some _ -> failwith "Match3 succeeded, but did not find exactly three matches."
-    | None -> None  
-
-// Example
-let (month, day, year) : (int * int * int) =
-    match DateTime.Now.ToString() with
-    | Match3 "(\d*)/(\d*)/(\d*).*" (a,b,c) -> (a,b,c)
-    | _ -> failwith "Match Not Found."
+//let (|FirstRegexGroup|_|) pattern input =
+//   let m = Regex.Match(input,pattern) 
+//   if (m.Success) then Some m.Groups.[1].Value else None 
 
 
 [<EntryPoint>]
@@ -104,7 +88,12 @@ let main argv =
         for line in readLines stdin do
             printfn "LINE: %s" line
 
-            let m = Regex.Match (line, pattern)
+            let m =
+                match line with
+                | FirstRegexGroup "^project\ \"(.*)\"$" project -> 
+                       printfn "MATCH PROJECT %s" project
+                | _ -> printfn "NO MATCH"
+            ()
     }
 
     handleCommands
