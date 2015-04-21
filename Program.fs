@@ -41,6 +41,10 @@ module CmdRegex =
        let m = Regex.Match (input, "^tooltip\s\"(.*)\"\s([0-9]+)\s([0-9]+)$")
        if (m.Success) then Some (m.Groups.[1].Value, Int32.Parse(m.Groups.[2].Value), Int32.Parse(m.Groups.[3].Value)) else None
 
+    let (|Completion|_|) input =
+       let m = Regex.Match (input, "^completion\s\"(.*)\"\s([0-9]+)\s([0-9]+)$")
+       if (m.Success) then Some (m.Groups.[1].Value, Int32.Parse(m.Groups.[2].Value), Int32.Parse(m.Groups.[3].Value)) else None
+
 type CmdResultError = {
     Kind : string
     Data : FSharpErrorInfo []
@@ -60,6 +64,12 @@ type CmdResultTooltip = {
     Kind : string
     Data: string
 }
+
+type CmdResultCompletion = {
+    Kind : string
+    Data: string
+}
+
 
 [<EntryPoint>]
 let main argv = 
@@ -118,14 +128,28 @@ let main argv =
         | None -> return None
         | Some (col, identIsland) ->
 //          printfn "identIsland %A" identIsland
-          let! res = results.GetToolTipTextAlternate(row, col, line, identIsland, identToken)
-          let! sym = results.GetSymbolUseAtLocation(row, col, line, identIsland)
+          let! res = results.GetToolTipTextAlternate (row, col, line, identIsland, identToken)
+          let! sym = results.GetSymbolUseAtLocation (row, col, line, identIsland)
 //          printfn "Result: Got something, returning %A" sym
           return sym |> Option.bind (fun sym -> let (_, startCol), (_, endCol) = Symbols.trimSymbolRegion sym (Seq.last identIsland)
                                                 Some (res, (startCol, endCol)))
     }
 
-    
+    let getDeclarationLocation (results:FSharpCheckFileResults) row col line = async {
+        match Parsing.findLongIdents(col, line) with 
+        | None -> return FSharpFindDeclResult.DeclNotFound FSharpFindDeclFailureReason.Unknown
+        | Some (col, identIsland) -> return! results.GetDeclarationLocationAlternate (row, col, line, identIsland, false)
+    }
+
+    let getDeclarations (checkResults:FSharpCheckFileResults) (parseResults:FSharpParseFileResults) line col lineStr = 
+        let longName,residue = Parsing.findLongIdentsAndResidue(col, lineStr)
+//        Debug.WriteLine (sprintf "GetDeclarations: '%A', '%s'" longName residue)
+        try
+         let results =
+             Async.RunSynchronously (checkResults.GetDeclarationListInfo(Some parseResults, line, col, lineStr, longName, residue, fun (_,_) -> false),
+                                     timeout = 250)
+         Some (results, residue)
+        with :? TimeoutException -> None
 
     let rec readLines stream = asyncSeq {
         let rec readLine (stream:Stream) = asyncSeq {
@@ -155,12 +179,14 @@ let main argv =
 //        let! projectOptions = checker.GetProjectOptionsFromScript (sourceFile, sourceText, DateTime.Now)
 //        printfn "%s" (JsonConvert.SerializeObject ({CmdProjectOptions.Kind = "debug"; Log = projectOptions}))
 
-        let allFileResults = new Dictionary<string, FSharpCheckFileResults> ()
+        let allFileCheckResults = new Dictionary<string, FSharpCheckFileResults> ()
         let allFileSources = new Dictionary<string, string[]> ()
+        let allFileParseResults = new Dictionary<string, FSharpParseFileResults> ()
 
         for line in readLines stdin do
 
-            printfn "LINE: %i" readLineCount.Value
+//            printfn "IN COUNT: %i" readLineCount.Value
+            printfn "LINE: %s" line
             readLineCount.Value <- readLineCount.Value + 1
 
             match line with
@@ -185,53 +211,68 @@ let main argv =
 //                let! source = readSource stdin
 //                printfn "SOURCE-CODE\n%s" (JsonConvert.SerializeObject ({Kind = "debug"; Log = source}))
 //                printfn "SOURCE: %s" source
-                let! parseResults = checker.ParseFileInProject (file, source, projectOptions)
-                let! fileAnswer = checker.CheckFileInProject (parseResults, file, 0, source, projectOptions)
+                let! fileParseResults = checker.ParseFileInProject (file, source, projectOptions)
+                let! fileAnswer = checker.CheckFileInProject (fileParseResults, file, 0, source, projectOptions)
 
                 match fileAnswer with
-                | FSharpCheckFileAnswer.Succeeded fileResults ->
-                    allFileResults.[file] <- fileResults
+                | FSharpCheckFileAnswer.Succeeded fileCheckResults ->
+                    allFileCheckResults.[file] <- fileCheckResults
                     allFileSources.[file] <- lines
-                    let json = JsonConvert.SerializeObject ({CmdResultError.Kind = "errors"; Data = fileResults.Errors})
+                    allFileParseResults.[file] <- fileParseResults
+                    let json = JsonConvert.SerializeObject ({CmdResultError.Kind = "errors"; Data = fileCheckResults.Errors})
                     printfn "%s" json
                 | FSharpCheckFileAnswer.Aborted ->
                     ()
 
                 ()
             | CmdRegex.Tooltip (file, row, column) ->
-//                printfn "LOOKING FOR TOOLTIPS at %i %i in %s" row column file
-                let fileResults = allFileResults.[file]
+                let fileCheckResults = allFileCheckResults.[file]
                 let lines = allFileSources.[file]
-                let! tooltip = getToolTip fileResults row column lines.[row - 1]
-//                let! tooltip = fileResults.GetToolTipTextAlternate (row, column, line, [], identToken)
+                let! tooltip = getToolTip fileCheckResults row column lines.[row - 1]
 
                 match tooltip with
                 | Some ((FSharpToolTipText tips), (x, y)) ->
                     for tip in tips do
                         match tip with
                         | (FSharpToolTipElement.Single (text, doc)) ->
-//                            printfn "LINE: %s" line
-//                            printfn "SINGLE TOOLTIPS %A" text
                             let json = JsonConvert.SerializeObject ({CmdResultTooltip.Kind = "tooltip"; Data = text})
                             printfn "%s" json
                         | (FSharpToolTipElement.Group items) ->
                             for (text, doc) in items do
-//                                printfn "LINE: %s" line
-//                                printfn "GROUP TOOLTIP %A" text
                                 let json = JsonConvert.SerializeObject ({CmdResultTooltip.Kind = "tooltip"; Data = text})
                                 printfn "%s" json
                         | _ -> ()
-//                    let json = JsonConvert.SerializeObject ({CmdResultTooltip.Kind = "tooltip"; Data = tooltip})
-//                    printfn "%s" json
                     ()
                 | None ->
-//                    printfn "NOT FOUND TOOLTIPS %A" file
                     ()
-//                | FSharpToolTipText item ->
-//                    let json = JsonConvert.SerializeObject ({CmdResultTooltip.Kind = "tooltip"; Data = item})
+                ()
+            | CmdRegex.Completion (file, row, column) ->
+                let fileCheckResults = allFileCheckResults.[file]
+                let fileParseResults = allFileParseResults.[file]
+                let lines = allFileSources.[file]
+                let decls = getDeclarations fileCheckResults fileParseResults row column lines.[row - 1]
+
+                match decls with
+                | Some (info, doc) ->
+                    printfn "COMPLETION DOC: %s" doc
+//                    let json = JsonConvert.SerializeObject ({CmdResultCompletion.Kind = "completion"; Data = decl.})
 //                    printfn "%s" json
-//                printfn "MATCH TOOLTIP %s %i %i" file line column
-                
+                    ()
+                    
+//                | Some ((FSharpToolTipText tips), (x, y)) ->
+//                    for tip in tips do
+//                        match tip with
+//                        | (FSharpToolTipElement.Single (text, doc)) ->
+//                            let json = JsonConvert.SerializeObject ({CmdResultTooltip.Kind = "tooltip"; Data = text})
+//                            printfn "%s" json
+//                        | (FSharpToolTipElement.Group items) ->
+//                            for (text, doc) in items do
+//                                let json = JsonConvert.SerializeObject ({CmdResultTooltip.Kind = "tooltip"; Data = text})
+//                                printfn "%s" json
+//                        | _ -> ()
+//                    ()
+                | _ ->
+                    ()
                 ()
             | _ ->
 //                printfn "NO MATCH"
