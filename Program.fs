@@ -42,8 +42,8 @@ module CmdRegex =
        if (m.Success) then Some (m.Groups.[1].Value, Int32.Parse(m.Groups.[2].Value), Int32.Parse(m.Groups.[3].Value)) else None
 
     let (|Completion|_|) input =
-       let m = Regex.Match (input, "^completion\s\"(.*)\"\s([0-9]+)\s([0-9]+)$")
-       if (m.Success) then Some (m.Groups.[1].Value, Int32.Parse(m.Groups.[2].Value), Int32.Parse(m.Groups.[3].Value)) else None
+       let m = Regex.Match (input, "^completion\s\"(.*)\"\s\"(.*)\"\s([0-9]+)\s([0-9]+)$")
+       if (m.Success) then Some (m.Groups.[1].Value, m.Groups.[2].Value, Int32.Parse(m.Groups.[3].Value), Int32.Parse(m.Groups.[4].Value)) else None
 
 type CmdResultError = {
     Kind : string
@@ -62,12 +62,12 @@ type CmdProjectOptions = {
 
 type CmdResultTooltip = {
     Kind : string
-    Data: string
+    Data : string
 }
 
 type CmdResultCompletion = {
     Kind : string
-    Data: string
+    Data : (string * string * string) []
 }
 
 
@@ -141,12 +141,12 @@ let main argv =
         | Some (col, identIsland) -> return! results.GetDeclarationLocationAlternate (row, col, line, identIsland, false)
     }
 
-    let getDeclarations (checkResults:FSharpCheckFileResults) (parseResults:FSharpParseFileResults) line col lineStr = 
-        let longName,residue = Parsing.findLongIdentsAndResidue(col, lineStr)
+    let getDeclarations (checkResults:FSharpCheckFileResults) (parseResults:FSharpParseFileResults) row col line = 
+        let longName,residue = Parsing.findLongIdentsAndResidue(col, line)
 //        Debug.WriteLine (sprintf "GetDeclarations: '%A', '%s'" longName residue)
         try
          let results =
-             Async.RunSynchronously (checkResults.GetDeclarationListInfo(Some parseResults, line, col, lineStr, longName, residue, fun (_,_) -> false),
+             Async.RunSynchronously (checkResults.GetDeclarationListInfo(Some parseResults, row, col, line, longName, residue, fun (_,_) -> false),
                                      timeout = 250)
          Some (results, residue)
         with :? TimeoutException -> None
@@ -231,32 +231,59 @@ let main argv =
                 let! tooltip = getToolTip fileCheckResults row column lines.[row - 1]
 
                 match tooltip with
-                | Some ((FSharpToolTipText tips), (x, y)) ->
-                    for tip in tips do
-                        match tip with
-                        | (FSharpToolTipElement.Single (text, doc)) ->
-                            let json = JsonConvert.SerializeObject ({CmdResultTooltip.Kind = "tooltip"; Data = text})
-                            printfn "%s" json
-                        | (FSharpToolTipElement.Group items) ->
-                            for (text, doc) in items do
-                                let json = JsonConvert.SerializeObject ({CmdResultTooltip.Kind = "tooltip"; Data = text})
-                                printfn "%s" json
-                        | _ -> ()
-                    ()
-                | None ->
-                    ()
-                ()
-            | CmdRegex.Completion (file, row, column) ->
+                | Some (tip, (x, y)) ->
+                    let tipText = TipFormatter.formatTip tip
+                    let json = JsonConvert.SerializeObject ({CmdResultTooltip.Kind = "tooltip"; Data = tipText})
+                    printfn "%s" json
+                | None -> ()
+
+            | CmdRegex.Completion (file, prefix, row, column) ->
                 let fileCheckResults = allFileCheckResults.[file]
                 let fileParseResults = allFileParseResults.[file]
                 let lines = allFileSources.[file]
                 let decls = getDeclarations fileCheckResults fileParseResults row column lines.[row - 1]
 
+                let declType glyph =
+                    match glyph with
+                    | 6  -> "value"
+//                    | 6  -> "keyword"
+                    | 24  -> "union" // union constructor
+                    | 132  -> "type" // union type
+                    | 74  -> "function"
+                    | 0   -> "class" //
+                    | 84  -> "class" //
+                    | 48  -> "interface" // interface
+                    | 72  -> "method"
+                    | 90  -> "namespace"
+                    | 102 -> "property"
+                    | _   -> glyph.ToString ()
+
+                let shouldMatchPrefix = if prefix = "" || prefix = "." then false else true
+                let findMatch (text:string) = if shouldMatchPrefix then text.StartsWith prefix else false
+
                 match decls with
                 | Some (info, doc) ->
-                    printfn "COMPLETION DOC: %s" doc
-//                    let json = JsonConvert.SerializeObject ({CmdResultCompletion.Kind = "completion"; Data = decl.})
-//                    printfn "%s" json
+
+                    let help = Array.tryFind (fun (item:FSharpDeclarationListItem) -> findMatch item.Name) info.Items
+                    let helpText =
+                        match help with
+                        | Some item -> TipFormatter.formatTip item.DescriptionText
+                        | None -> ""
+                    let matchDecl decl =
+                        match help with
+                        | Some help when help = decl -> helpText
+                        | _ -> ""
+                    let decls = Array.map (fun (item:FSharpDeclarationListItem) -> item.Name, declType item.Glyph, matchDecl item) info.Items
+
+//                    TipFormatter
+
+                    
+
+
+//                    info.Items.[0].Name
+                    //printfn "COMPLETION DOC: %s" doc
+                    let json = JsonConvert.SerializeObject ({CmdResultCompletion.Kind = "completion"; Data = decls})
+                    printfn "%s" json
                     ()
                     
 //                | Some ((FSharpToolTipText tips), (x, y)) ->
