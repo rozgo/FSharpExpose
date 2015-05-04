@@ -13,6 +13,7 @@ open Microsoft.FSharp.Compiler.SourceCodeServices
 let private buildFormatComment cmt (sb:StringBuilder) =
   match cmt with
   | FSharpXmlDoc.Text s -> sb.AppendLine(s)
+//  | FSharpXmlDoc.XmlDocFileSignature (s1, s2) -> sb.AppendLine(s1); sb.AppendLine(s2)
   // For 'XmlCommentSignature' we could get documentation from 'xml'
   // files, but I'm not sure whether these are available on Mono
   | _ -> sb
